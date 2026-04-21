@@ -39,35 +39,86 @@ Why Modules?
 - Re-use
 - Group multiple resources into a logical unit
 
-Input variables -> Webserver module -> Output values
+```
+Input variables -> Module -> Output values
+```
 
-input variables = like function arguments
+- **Input variables** — like function arguments
+- **Output values** — like function return values
 
-output variables = like function return values
+---
 
 ### Project structure
 
-- main.tf
-- variables.tf
-- outputs.tf
-- providers.tf
+```
+terraform-module-12.2/
+├── main.tf                 # Root: provider, VPC, module calls
+├── variables.tf            # Root input variables
+├── outputs.tf              # Root outputs (ec2_public_ip)
+├── providers.tf            # Terraform + AWS provider version pin
+├── terraform.tfvars        # Your values (gitignored)
+├── terraform.tfvars.example
+├── entry-script.sh         # EC2 user_data bootstrap (Docker + nginx)
+└── modules/
+    ├── subnet/
+    │   ├── main.tf         # aws_subnet, aws_internet_gateway, aws_default_route_table
+    │   ├── variables.tf
+    │   ├── outputs.tf      # subnet
+    │   └── providers.tf
+    └── webserver/
+        ├── main.tf         # aws_default_security_group, aws_ami, aws_key_pair, aws_instance
+        ├── variables.tf
+        ├── outputs.tf      # instance
+        └── providers.tf
+```
 
+---
 
 ### Prepare modules directory
 
 - Create `modules` directory and subfolders for modules: `subnet`, `webserver`
+- Create tf files inside each module dir: `main.tf`, `outputs.tf`, `variables.tf`, `providers.tf`
 
-- Create tf files inside of the each module dir: `main.tf`, `outputs.tf`, `variables.tf`, `providers.tf`
+Each module's `providers.tf` pins the AWS provider so the module stays self-describing:
+
+```tf
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "6.41.0"
+    }
+  }
+}
+```
+
+---
 
 ### Create `subnet` module
 
-- Move `"aws_subnet" "myapp-subnet-1"`, `"aws_internet_gateway" "myapp-igw"`, `"aws_default_route_table" "main-rtb"` to `modules/subnet/main.tf`
+- Move `"aws_subnet" "myapp-subnet-1"`, `"aws_internet_gateway" "myapp-igw"`, and `"aws_default_route_table" "main-rtb"` to `modules/subnet/main.tf`
+- Replace references to resources that no longer live inside the module with input variables
+- Declare those inputs in the module's `variables.tf`
 
-- Replace references that are not exist inside the module with variables
+file: `modules/subnet/variables.tf`
+```tf
+variable subnet_cidr_block {}
+variable avail_zone {}
+variable env_prefix {}
+variable vpc_id {}
+variable default_route_table_id {}
+```
 
-- Define variables in the module `variables.tf` file
+- Expose the subnet as a module output so the root (and other modules) can reference it
 
-- Add the module to `main.tf` and pass variables
+file: `modules/subnet/outputs.tf`
+```tf
+output "subnet" {
+  value = aws_subnet.myapp-subnet-1
+}
+```
+
+- Wire the module into the root `main.tf` and pass variables
 
 ```tf
 module "myapp-subnet" {
@@ -80,15 +131,7 @@ module "myapp-subnet" {
 }
 ```
 
-- Configure the module output
-
-```tf
-output "subnet" {
-  value = aws_subnet.myapp-subnet-1
-}
-```
-
-Replace `subnet_id` with `subnet_id = module.myapp-subnet.subnet.id` in `"aws_instance" "myapp-server"` (`main.tf`)
+> The `aws_instance.myapp-server` resource's `subnet_id` will now reference the module's output: `subnet_id = module.myapp-subnet.subnet.id`. This reference will move into the webserver module in the next step.
 
 - Apply terraform configuration
 
@@ -98,34 +141,52 @@ terraform init
 
 ![](./images/init-subnet-module.png)
 
+> `terraform init` is required whenever you add or change a `module` block — it installs/links the module source.
+
 ```sh
 terraform plan
 ```
 
 ![](./images/plan-subnet-module.png)
 
-Execute
 ```sh
 terraform apply --auto-approve
 ```
 
 ![](./images/apply-subnet-module.png)
 
-EC2 instances was created and running
+EC2 instance was created and running
 ![](./images/ec2-instance.png)
 
+---
 
 ### Create `webserver` module
 
-- Move `"aws_default_security_group" "default-sg"`, `"aws_ami" "latest-amazon-linux-image"`, `"aws_key_pair" "ssh-key"`, `"aws_instance" "myapp-server"` to `modules/webserver/main.tf`
+- Move `"aws_default_security_group" "default-sg"`, `"aws_ami" "latest-amazon-linux-image"` (data source), `"aws_key_pair" "ssh-key"`, and `"aws_instance" "myapp-server"` to `modules/webserver/main.tf`
+- Replace external references with input variables
 
-- Replace references that are not exist inside the module with variables
+file: `modules/webserver/variables.tf`
+```tf
+variable vpc_id {}
+variable my_ip {}
+variable env_prefix {}
+variable image_name {}
+variable public_key_location {}
+variable instance_type {}
+variable subnet_id {}
+variable avail_zone {}
+```
 
-- Define variables in the module `variables.tf` file
+- Expose the EC2 instance as a module output
 
-- Add the module to `main.tf` and pass variables
+file: `modules/webserver/outputs.tf`
+```tf
+output "instance" {
+  value = aws_instance.myapp-server
+}
+```
 
-- Add the module to `main.tf` and pass variables
+- Wire the module into the root `main.tf` and pass variables (including the subnet id from the other module)
 
 ```tf
 module "myapp-server" {
@@ -141,14 +202,7 @@ module "myapp-server" {
 }
 ```
 
-- Configure the module output
-
-file: `modules/webserver/outputs.tf`
-```tf
-output "instance" {
-  value = aws_instance.myapp-server
-}
-```
+- Surface the public IP at the root so it's visible after `apply`
 
 file: `outputs.tf`
 ```tf
@@ -157,9 +211,25 @@ output "ec2_public_ip" {
 }
 ```
 
-- Apply terraform configuration
+After modularization, the root `main.tf` is left with only the provider, the VPC, and the two module calls:
 
-Execute
+```tf
+provider "aws" {
+  region = "eu-central-1"
+}
+
+resource "aws_vpc" "myapp-vpc" {
+  cidr_block = var.vpc_cidr_block
+  tags = {
+    Name: "${var.env_prefix}-vpc"
+  }
+}
+
+module "myapp-subnet" { ... }
+module "myapp-server" { ... }
+```
+
+- Apply terraform configuration
 
 ```sh
 terraform init
@@ -179,12 +249,33 @@ terraform apply --auto-approve
 
 ![](./images/apple-webserver-module.png)
 
-
 SSH to the instance
 ```sh
 ssh ec2-user@<ec2_public_ip>
-# to check script was run
+# verify the user_data script ran
 docker -v
 ```
 
 ![](./images/ssh.png)
+
+The app (nginx in a container) is exposed on port 8080: `http://<ec2_public_ip>:8080`.
+
+---
+
+### Clean up
+
+Destroy all managed resources when finished to avoid AWS charges:
+
+```sh
+terraform destroy --auto-approve
+```
+
+---
+
+### Key takeaways
+
+- **Modules are the unit of reuse** — group related resources behind a clean input/output interface
+- **Outputs are the module's public API** — expose only what callers need (`subnet`, `instance`)
+- **Cross-module wiring happens at the root** — one module's output becomes another module's input (`module.myapp-subnet.subnet.id` → `module.myapp-server` as `subnet_id`)
+- **Pin provider versions per module** — each module's own `providers.tf` keeps it portable
+- **Run `terraform init` after adding or changing a module block** — Terraform needs to resolve the new source
