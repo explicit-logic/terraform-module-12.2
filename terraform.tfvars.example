@@ -1,0 +1,9 @@
+vpc_cidr_block = "10.0.0.0/16"
+subnet_cidr_block = "10.0.10.0/24"
+
+avail_zone = "eu-central-1b"
+env_prefix = "dev"
+my_ip = "0.0.0.0/32"
+instance_type = "t2.micro"
+image_name = "al2023-ami-2023.*-kernel-6.1-x86_64"
+public_key_location = "/Users/me/.ssh/id_rsa.pub"
